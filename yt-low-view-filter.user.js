@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.1.0
 // @description  Filters low-view YouTube videos with hide/highlight test modes and on-page debug HUD.
-// @author       Rupesh Ghimire | https://github.com/RupeshGhimire
+// @author       Rupesh Ghimire | 
 // @match        *://www.youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
