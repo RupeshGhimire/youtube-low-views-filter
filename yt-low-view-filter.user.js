@@ -5,6 +5,7 @@
 // @description  Filters low-view YouTube videos with hide/highlight test modes and on-page debug HUD.
 // @author       Rupesh Ghimire | https://github.com/RupeshGhimire
 // @match        *://www.youtube.com/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -13,7 +14,7 @@
     'use strict';
 
     //------------------------------------------------------------------------------------------------------
-    // User Configuration (safe to edit)
+    // Edit this part below
     //------------------------------------------------------------------------------------------------------
 
     const CONFIG = {
@@ -21,11 +22,11 @@
         minViews: 1000,
 
         // Console logging and on-page HUD for testing.
-        debug: true, // Set to false to disable all debug logging and the debug panel.
-        showDebugPanel: true, // Shows a debug panel with stats and last action info.
+        debug: false, // Set to false to disable all debug logging and the debug panel.
+        showDebugPanel: false, // Shows a debug panel with stats and last action info.
 
         // 'hide' = remove cards, 'highlight' = keep video cards visible but mark them red to make sure script is working as intended.
-        filterActionMode: 'highlight',
+        filterActionMode: 'hide',
 
         // Shorts controls. Might not work perfectly due to YouTube's dynamic shorts content
         hideShortsShelves: true,
@@ -39,7 +40,7 @@
     };
 
     //------------------------------------------------------------------------------------------------------
-    // Internal tuning (normally no need to edit)
+    // Don't edit below unless you know what you're doing. 
     //------------------------------------------------------------------------------------------------------
 
     const INTERNAL = {
