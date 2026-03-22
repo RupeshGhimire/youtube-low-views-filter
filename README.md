@@ -26,6 +26,7 @@ Edit the `CONFIG` object in the script:
 - `showDebugPanel`: show/hide on-page debug panel.
 - `hideShortsShelves` / `hideShortsCards`: shorts filtering behavior.
 - `hideLiveAndUpcoming`: include live/upcoming cards.
+- `filterWatchPageRecommendations`: toggle filtering in watch-page sidebar recommendations.
 
 ## Notes
 
