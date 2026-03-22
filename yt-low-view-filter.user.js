@@ -35,6 +35,9 @@
         // If true, low-view live/upcoming cards are filtered too.
         hideLiveAndUpcoming: true,
 
+        // If true, low-view recommendations on the watch page sidebar are filtered too.
+        filterWatchPageRecommendations: true,
+
         // Optional safety full-page rescan (ms). Set 0 to disable if page is unstable and jittery.
         safetyRescanMs: 15000
     };
@@ -62,12 +65,34 @@
     };
 
     const RENDERER_SELECTOR = [
+        'yt-lockup-view-model',
         'ytd-rich-item-renderer',
         'ytd-video-renderer',
         'ytd-compact-video-renderer',
+        'ytd-compact-radio-renderer',
+        'ytd-watch-card-compact-video-renderer',
+        'ytd-playlist-panel-video-renderer',
         'ytd-grid-video-renderer',
         'ytd-playlist-video-renderer'
     ].join(',');
+
+    const CANDIDATE_TEXT_SELECTOR = [
+        '#video-title',
+        '#video-title-link',
+        '#metadata-line',
+        '#metadata-line span',
+        '#metadata',
+        '#details',
+        '#text-container',
+        '#byline-container',
+        '#dismissible',
+        'yt-formatted-string',
+        '#text'
+    ].join(',');
+
+    const TITLE_LINK_SELECTOR = 'a#video-title-link, a#video-title, a.yt-lockup-metadata-view-model__title';
+
+    const WATCH_RECOMMENDATION_CONTAINER_SELECTOR = 'ytd-watch-next-secondary-results-renderer, ytd-playlist-panel-renderer';
 
     const VIEW_WORDS = [
         'views?',
@@ -79,7 +104,6 @@
         'aufrufe',
         'visualizzazioni',
         'weergaven',
-        'visualizacoes',
         'visualizacoes',
         'просмотр(?:ов|а)?',
         '次观看',
@@ -106,6 +130,13 @@
         ['млрд', 1000000000],
         ['млрд.', 1000000000]
     ]);
+
+    const NO_VIEWS_REGEX = /\bno views\b/;
+    const ARIA_SPLIT_REGEX = /\s*[•|]\s*/;
+    const RAW_PART_REGEX = /^\d{1,3}(?:[.,\s]\d{3})+$|^\d+$/;
+    const ENGLISH_VIEW_WATCH_REGEX = /(view|watch)/;
+    const COMPACT_VIEW_REGEX = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*([a-zA-Z\u0400-\u04FF.]+)\\s*(?:' + VIEW_WORDS + ')', 'i');
+    const RAW_VIEW_REGEX = new RegExp('(\\d{1,3}(?:[.,\\s]\\d{3})+|\\d+)\\s*(?:' + VIEW_WORDS + ')', 'i');
 
     function log() {
         if (!CONFIG.debug) {
@@ -149,6 +180,10 @@
     }
 
     function updateDebugPanel() {
+        if (!CONFIG.debug || !CONFIG.showDebugPanel) {
+            return;
+        }
+
         if (DebugState.panelTimer !== null) {
             return;
         }
@@ -269,12 +304,11 @@
             return null;
         }
 
-        if (/\bno views\b/.test(normalized)) {
+        if (NO_VIEWS_REGEX.test(normalized)) {
             return 0;
         }
 
-        const compactPattern = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*([a-zA-Z\u0400-\u04FF.]+)\\s*(?:' + VIEW_WORDS + ')', 'i');
-        const compactMatch = normalized.match(compactPattern);
+        const compactMatch = normalized.match(COMPACT_VIEW_REGEX);
         if (compactMatch) {
             const base = parseCompactNumber(compactMatch[1]);
             const suffix = compactMatch[2].toLowerCase();
@@ -285,16 +319,15 @@
             }
         }
 
-        const rawPattern = new RegExp('(\\d{1,3}(?:[.,\\s]\\d{3})+|\\d+)\\s*(?:' + VIEW_WORDS + ')', 'i');
-        const rawMatch = normalized.match(rawPattern);
+        const rawMatch = normalized.match(RAW_VIEW_REGEX);
         if (rawMatch) {
             return parseGroupedInteger(rawMatch[1]);
         }
 
-        const ariaParts = normalized.split(/\s*[•|]\s*/);
+        const ariaParts = normalized.split(ARIA_SPLIT_REGEX);
         for (const part of ariaParts) {
-            const rawPartMatch = part.match(/^\d{1,3}(?:[.,\s]\d{3})+$|^\d+$/);
-            if (rawPartMatch && /(view|watch)/.test(normalized)) {
+            const rawPartMatch = part.match(RAW_PART_REGEX);
+            if (rawPartMatch && ENGLISH_VIEW_WATCH_REGEX.test(normalized)) {
                 return parseGroupedInteger(rawPartMatch[0]);
             }
         }
@@ -305,30 +338,17 @@
     function collectCandidateTexts(renderer) {
         const texts = new Set();
 
-        const selectors = [
-            '#video-title',
-            '#video-title-link',
-            '#metadata-line',
-            '#metadata',
-            '#details',
-            '#dismissible',
-            'yt-formatted-string',
-            '#text'
-        ];
-
-        for (const selector of selectors) {
-            const nodes = renderer.querySelectorAll(selector);
-            for (const node of nodes) {
-                const ariaLabel = node.getAttribute && node.getAttribute('aria-label');
-                const text = ariaLabel || node.textContent || '';
-                const normalized = text.trim();
-                if (normalized) {
-                    texts.add(normalized);
-                }
+        const nodes = renderer.querySelectorAll(CANDIDATE_TEXT_SELECTOR);
+        for (const node of nodes) {
+            const ariaLabel = node.getAttribute && node.getAttribute('aria-label');
+            const text = ariaLabel || node.textContent || '';
+            const normalized = text.trim();
+            if (normalized) {
+                texts.add(normalized);
             }
         }
 
-        const titleLink = renderer.querySelector('a#video-title-link, a#video-title, a.yt-lockup-metadata-view-model__title');
+        const titleLink = renderer.querySelector(TITLE_LINK_SELECTOR);
         if (titleLink) {
             const aria = titleLink.getAttribute('aria-label');
             if (aria) {
@@ -341,7 +361,7 @@
             }
         }
 
-        const fullText = renderer.innerText || renderer.textContent || '';
+        const fullText = renderer.textContent || '';
         if (fullText.trim()) {
             texts.add(fullText);
         }
@@ -372,8 +392,12 @@
     }
 
     function isLiveOrUpcoming(renderer) {
-        const text = normalizeText(renderer.innerText || renderer.textContent || '');
+        const text = normalizeText(renderer.textContent || '');
         return /\blive\b|\blive now\b|\bupcoming\b|\bpremiere\b|\bwatching\b/.test(text);
+    }
+
+    function isWatchRecommendationRenderer(renderer) {
+        return renderer.closest(WATCH_RECOMMENDATION_CONTAINER_SELECTOR) !== null;
     }
 
     function hideRenderer(renderer, reason) {
@@ -420,6 +444,10 @@
         }
 
         if (!CONFIG.hideLiveAndUpcoming && isLiveOrUpcoming(renderer)) {
+            return true;
+        }
+
+        if (!CONFIG.filterWatchPageRecommendations && isWatchRecommendationRenderer(renderer)) {
             return true;
         }
 
@@ -479,7 +507,6 @@
         updateDebugPanel();
     }
 
-    let scanQueued = false;
     let scanTimer = null;
     let scanFullRequested = false;
     const pendingRenderers = new Set();
@@ -522,9 +549,7 @@
         }
 
         window.clearTimeout(scanTimer);
-        scanQueued = true;
         scanTimer = window.setTimeout(function () {
-            scanQueued = false;
             if (scanFullRequested) {
                 scanFullRequested = false;
                 pendingRenderers.clear();
