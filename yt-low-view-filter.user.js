@@ -38,6 +38,9 @@
         // If true, low-view recommendations on the watch page sidebar are filtered too.
         filterWatchPageRecommendations: true,
 
+        // If true, filtering is disabled on subscription page (recommended to keep subscription feed unfiltered)
+        disableOnSubscriptionPage: true,
+
         // Optional safety full-page rescan (ms). Set 0 to disable if page is unstable and jittery.
         safetyRescanMs: 15000
     };
@@ -46,9 +49,32 @@
     // Don't edit below unless you know what you're doing. 
     //------------------------------------------------------------------------------------------------------
 
+    // Configuration validation
+    (function validateConfig() {
+        if (CONFIG.minViews < 0) {
+            console.warn('[YT Low View Filter] minViews should be >= 0, defaulting to 1000');
+            CONFIG.minViews = 1000;
+        }
+        
+        if (CONFIG.safetyRescanMs < 0) {
+            console.warn('[YT Low View Filter] safetyRescanMs should be >= 0, defaulting to 15000');
+            CONFIG.safetyRescanMs = 15000;
+        }
+        
+        if (!['hide', 'highlight'].includes(CONFIG.filterActionMode)) {
+            console.warn('[YT Low View Filter] filterActionMode should be "hide" or "highlight", defaulting to "hide"');
+            CONFIG.filterActionMode = 'hide';
+        }
+        
+        if (CONFIG.debug && CONFIG.showDebugPanel) {
+            console.log('[YT Low View Filter] Debug mode enabled with panel');
+        }
+    })();
+
     const INTERNAL = {
         scanDebounceMs: 120,
-        panelUpdateDebounceMs: 120
+        panelUpdateDebounceMs: 120,
+        mutationThrottleMs: 50
     };
 
     const DebugState = {
@@ -77,23 +103,21 @@
     ].join(',');
 
     const CANDIDATE_TEXT_SELECTOR = [
+        '#metadata-line',
+        '#metadata-line span:nth-child(2)',
+        '[aria-label*="view"]',
+        '[aria-label*="views"]',
         '#video-title',
         '#video-title-link',
-        '#metadata-line',
-        '#metadata-line span',
-        '#metadata',
         '#details',
-        '#text-container',
-        '#byline-container',
-        '#dismissible',
-        'yt-formatted-string',
-        '#text'
+        'yt-formatted-string'
     ].join(',');
 
     const TITLE_LINK_SELECTOR = 'a#video-title-link, a#video-title, a.yt-lockup-metadata-view-model__title';
 
     const WATCH_RECOMMENDATION_CONTAINER_SELECTOR = 'ytd-watch-next-secondary-results-renderer, ytd-playlist-panel-renderer';
 
+    // Pre-compile regex patterns for better performance
     const VIEW_WORDS = [
         'views?',
         'viewers?',
@@ -134,16 +158,33 @@
     const NO_VIEWS_REGEX = /\bno views\b/;
     const ARIA_SPLIT_REGEX = /\s*[•|]\s*/;
     const RAW_PART_REGEX = /^\d{1,3}(?:[.,\s]\d{3})+$|^\d+$/;
-    const ENGLISH_VIEW_WATCH_REGEX = /(view|watch)/;
-    const COMPACT_VIEW_REGEX = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*([a-zA-Z\u0400-\u04FF.]+)\\s*(?:' + VIEW_WORDS + ')', 'i');
-    const RAW_VIEW_REGEX = new RegExp('(\\d{1,3}(?:[.,\\s]\\d{3})+|\\d+)\\s*(?:' + VIEW_WORDS + ')', 'i');
+    const ENGLISH_VIEW_WATCH_REGEX = /\b(view|watch)\b/i;
+    
+    // Pre-compile regex patterns once
+    const COMPACT_VIEW_REGEX = (function() {
+        try {
+            return new RegExp('(\\d+(?:[.,]\\d+)?)\\s*([a-zA-Z\u0400-\u04FF.]+)\\s*(?:' + VIEW_WORDS + ')', 'i');
+        } catch (e) {
+            console.error('[YT Low View Filter] Failed to compile COMPACT_VIEW_REGEX:', e);
+            return /$/; // Match nothing
+        }
+    })();
+    
+    const RAW_VIEW_REGEX = (function() {
+        try {
+            return new RegExp('(\\d{1,3}(?:[.,\\s]\\d{3})+|\\d+)\\s*(?:' + VIEW_WORDS + ')', 'i');
+        } catch (e) {
+            console.error('[YT Low View Filter] Failed to compile RAW_VIEW_REGEX:', e);
+            return /$/; // Match nothing
+        }
+    })();
 
-    function log() {
+    function log(...args) {
         if (!CONFIG.debug) {
             return;
         }
 
-        console.log('[YT Low View Filter]', ...arguments);
+        console.log('[YT Low View Filter]', ...args);
     }
 
     function ensureDebugPanel() {
@@ -151,6 +192,14 @@
             return null;
         }
 
+        // Check if panel already exists in DOM
+        let existingPanel = document.getElementById('yt-low-view-filter-debug');
+        if (existingPanel) {
+            DebugState.panel = existingPanel;
+            return existingPanel;
+        }
+
+        // Check if we have a panel reference that might be detached
         if (DebugState.panel && document.body.contains(DebugState.panel)) {
             return DebugState.panel;
         }
@@ -236,34 +285,37 @@
             return;
         }
 
-        renderer.style.setProperty('outline', '3px solid #ff4d4d', 'important');
-        renderer.style.setProperty('outline-offset', '-2px', 'important');
-        renderer.style.setProperty('background', 'rgba(255, 77, 77, 0.08)', 'important');
+        // Use requestAnimationFrame for smoother visual updates
+        requestAnimationFrame(() => {
+            renderer.style.setProperty('outline', '3px solid #ff4d4d', 'important');
+            renderer.style.setProperty('outline-offset', '-2px', 'important');
+            renderer.style.setProperty('background', 'rgba(255, 77, 77, 0.08)', 'important');
 
-        const badge = document.createElement('div');
-        badge.className = 'yt-low-view-badge';
-        badge.textContent = 'Low views: ' + reason;
-        badge.style.position = 'absolute';
-        badge.style.top = '6px';
-        badge.style.left = '6px';
-        badge.style.zIndex = '9999';
-        badge.style.background = '#ff4d4d';
-        badge.style.color = '#ffffff';
-        badge.style.font = '11px/1.2 monospace';
-        badge.style.padding = '3px 6px';
-        badge.style.borderRadius = '6px';
-        badge.style.pointerEvents = 'none';
+            const badge = document.createElement('div');
+            badge.className = 'yt-low-view-badge';
+            badge.textContent = 'Low views: ' + reason;
+            badge.style.position = 'absolute';
+            badge.style.top = '6px';
+            badge.style.left = '6px';
+            badge.style.zIndex = '9999';
+            badge.style.background = '#ff4d4d';
+            badge.style.color = '#ffffff';
+            badge.style.font = '11px/1.2 monospace';
+            badge.style.padding = '3px 6px';
+            badge.style.borderRadius = '6px';
+            badge.style.pointerEvents = 'none';
 
-        // Make sure the badge can anchor inside the card.
-        if (getComputedStyle(renderer).position === 'static') {
-            renderer.style.setProperty('position', 'relative', 'important');
-        }
+            // Make sure the badge can anchor inside the card.
+            if (getComputedStyle(renderer).position === 'static') {
+                renderer.style.setProperty('position', 'relative', 'important');
+            }
 
-        renderer.appendChild(badge);
-        renderer.dataset.ytLowViewHighlighted = '1';
-        DebugState.highlighted += 1;
-        DebugState.lastAction = 'highlight ' + reason;
-        updateDebugPanel();
+            renderer.appendChild(badge);
+            renderer.dataset.ytLowViewHighlighted = '1';
+            DebugState.highlighted += 1;
+            DebugState.lastAction = 'highlight ' + reason;
+            updateDebugPanel();
+        });
     }
 
     function clearHidden(renderer) {
@@ -400,18 +452,55 @@
         return renderer.closest(WATCH_RECOMMENDATION_CONTAINER_SELECTOR) !== null;
     }
 
+    // Cached subscription page check
+    let subscriptionPageCache = {
+        value: null,
+        timestamp: 0,
+        cacheDuration: 1000 // Cache for 1 second
+    };
+
+    function isSubscriptionPage() {
+        // Skip if disabled in config
+        if (!CONFIG.disableOnSubscriptionPage) {
+            return false;
+        }
+
+        // Check cache
+        const now = Date.now();
+        if (subscriptionPageCache.value !== null && 
+            (now - subscriptionPageCache.timestamp) < subscriptionPageCache.cacheDuration) {
+            return subscriptionPageCache.value;
+        }
+
+        // Check if current URL is the subscriptions page
+        const url = window.location.href.toLowerCase();
+        const isSubsPage = url.includes('/feed/subscriptions') || 
+                          url.includes('/subscriptions') ||
+                          document.querySelector('ytd-browse[page-subtype="subscriptions"]') !== null;
+
+        // Update cache
+        subscriptionPageCache.value = isSubsPage;
+        subscriptionPageCache.timestamp = now;
+
+        return isSubsPage;
+    }
+
     function hideRenderer(renderer, reason) {
         if (renderer.dataset.ytLowViewHidden === '1') {
             return;
         }
 
         clearHighlight(renderer);
-        renderer.style.setProperty('display', 'none', 'important');
-        renderer.dataset.ytLowViewHidden = '1';
-        DebugState.hidden += 1;
-        DebugState.lastAction = 'hide ' + reason;
-        updateDebugPanel();
-        log('Hidden:', reason, renderer);
+        
+        // Use requestAnimationFrame for smoother visual updates
+        requestAnimationFrame(() => {
+            renderer.style.setProperty('display', 'none', 'important');
+            renderer.dataset.ytLowViewHidden = '1';
+            DebugState.hidden += 1;
+            DebugState.lastAction = 'hide ' + reason;
+            updateDebugPanel();
+            log('Hidden:', reason, renderer);
+        });
     }
 
     function showRenderer(renderer) {
@@ -428,6 +517,28 @@
         DebugState.shown += 1;
         DebugState.lastAction = 'show';
         updateDebugPanel();
+    }
+
+    function restoreHiddenVideos() {
+        // Find all videos hidden by this script and show them
+        const hiddenRenderers = document.querySelectorAll('[data-yt-low-view-hidden="1"]');
+        const highlightedRenderers = document.querySelectorAll('[data-yt-low-view-highlighted="1"]');
+        
+        let restoredCount = 0;
+        
+        for (const renderer of hiddenRenderers) {
+            clearHidden(renderer);
+            restoredCount++;
+        }
+        
+        for (const renderer of highlightedRenderers) {
+            clearHighlight(renderer);
+            restoredCount++;
+        }
+        
+        if (CONFIG.debug && restoredCount > 0) {
+            log('Restored', restoredCount, 'videos on subscription page');
+        }
     }
 
     function shouldIgnoreRenderer(renderer) {
@@ -455,35 +566,52 @@
     }
 
     function processRenderer(renderer) {
-        if (shouldIgnoreRenderer(renderer)) {
+        try {
+            if (shouldIgnoreRenderer(renderer)) {
+                DebugState.ignored += 1;
+                return;
+            }
+
+            DebugState.processed += 1;
+
+            const views = getDetectedViews(renderer);
+            if (views === null) {
+                DebugState.unmatched += 1;
+                return;
+            }
+
+            if (views < CONFIG.minViews) {
+                const reason = 'views=' + views;
+                if (CONFIG.filterActionMode === 'highlight') {
+                    clearHidden(renderer);
+                    applyHighlight(renderer, reason);
+                }
+                else {
+                    hideRenderer(renderer, reason);
+                }
+                return;
+            }
+
+            showRenderer(renderer);
+        } catch (error) {
+            if (CONFIG.debug) {
+                console.error('[YT Low View Filter] Error processing renderer:', error, renderer);
+            }
             DebugState.ignored += 1;
-            return;
         }
-
-        DebugState.processed += 1;
-
-        const views = getDetectedViews(renderer);
-        if (views === null) {
-            DebugState.unmatched += 1;
-            return;
-        }
-
-        if (views < CONFIG.minViews) {
-            const reason = 'views=' + views;
-            if (CONFIG.filterActionMode === 'highlight') {
-                clearHidden(renderer);
-                applyHighlight(renderer, reason);
-            }
-            else {
-                hideRenderer(renderer, reason);
-            }
-            return;
-        }
-
-        showRenderer(renderer);
     }
 
     function scan(root) {
+        // Skip scanning on subscription page if configured
+        if (CONFIG.disableOnSubscriptionPage && isSubscriptionPage()) {
+            if (CONFIG.debug) {
+                log('Skipping scan on subscription page');
+            }
+            // Restore any previously hidden videos on subscription page
+            restoreHiddenVideos();
+            return;
+        }
+
         DebugState.scans += 1;
         const scope = root && root.querySelectorAll ? root : document;
         const renderers = scope.querySelectorAll(RENDERER_SELECTOR);
@@ -496,6 +624,14 @@
     }
 
     function processRendererSet(renderers) {
+        // Skip processing on subscription page if configured
+        if (CONFIG.disableOnSubscriptionPage && isSubscriptionPage()) {
+            if (CONFIG.debug) {
+                log('Skipping renderer set processing on subscription page');
+            }
+            return;
+        }
+
         DebugState.scans += 1;
 
         for (const renderer of renderers) {
@@ -565,8 +701,13 @@
         }, INTERNAL.scanDebounceMs);
     }
 
-    const observer = new MutationObserver(function (mutations) {
-        for (const mutation of mutations) {
+    let mutationThrottleTimer = null;
+    let pendingMutations = [];
+    
+    function processMutations() {
+        mutationThrottleTimer = null;
+        
+        for (const mutation of pendingMutations) {
             if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                 for (const node of mutation.addedNodes) {
                     enqueueFromNode(node);
@@ -580,9 +721,19 @@
                 }
             }
         }
-
+        
+        pendingMutations = [];
+        
         if (pendingRenderers.size > 0) {
             queueScan({});
+        }
+    }
+
+    const observer = new MutationObserver(function (mutations) {
+        pendingMutations.push(...mutations);
+        
+        if (mutationThrottleTimer === null) {
+            mutationThrottleTimer = window.setTimeout(processMutations, INTERNAL.mutationThrottleMs);
         }
     });
 
@@ -611,6 +762,9 @@
     }, { passive: true });
 
     window.addEventListener('yt-navigate-finish', function () {
+        // Invalidate subscription page cache on navigation
+        subscriptionPageCache.value = null;
+        subscriptionPageCache.timestamp = 0;
         queueScan({ full: true });
     }, { passive: true });
 
